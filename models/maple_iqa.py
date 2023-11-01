@@ -1,6 +1,5 @@
 import os.path as osp
 from collections import OrderedDict
-import math
 import copy
 import torch
 import torch.nn as nn
@@ -8,22 +7,29 @@ from torch.nn import functional as F
 from torch.cuda.amp import GradScaler, autocast
 from torch import linalg as LA
 from torchvision.transforms import CenterCrop
+import configparser
 
 from models.clip import clip
 from models.clip.simple_tokenizer import SimpleTokenizer as _Tokenizer
 
+def parse_tuple(input):
+    return tuple(int(k.strip()) for k in input[1:-1].split(','))
+
 _tokenizer = _Tokenizer()
 
-MAPLE_PROMPT_DEPTH = 9
-MAPLE_INPUT_SIZE = (224, 224)
-MAPLE_N_CTX = 2
-MAPLE_CTX_INIT = "This is a "
-MAPLE_PRETRAIN_DIR = './model.pth.tar-5'
-MAPLE_POS_EMBED = True
-MAPLE_INNER_BATCH = 12
+config = configparser.ConfigParser()
+config.read('/home/ccl/Code/MaPLe-IQA/CLIP/config_gen/mapleiqa_sample_2.ini')
 
-BACKBONE = 'ViT-B/32'
-DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
+MAPLE_PROMPT_DEPTH = int(config['MODEL_CONFIG']['MAPLE_PROMPT_DEPTH'])
+MAPLE_INPUT_SIZE = parse_tuple(config['MODEL_CONFIG']['MAPLE_INPUT_SIZE'])
+MAPLE_N_CTX = int(config['MODEL_CONFIG']['MAPLE_N_CTX'])
+MAPLE_CTX_INIT = config['MODEL_CONFIG']['MAPLE_CTX_INIT']
+MAPLE_PRETRAIN_DIR = config['MODEL_CONFIG']['MAPLE_PRETRAIN_DIR']
+MAPLE_POS_EMBED = config['MODEL_CONFIG']['MAPLE_POS_EMBED']
+MAPLE_INNER_BATCH = int(config['MODEL_CONFIG']['MAPLE_INNER_BATCH'])
+
+BACKBONE = config['MODEL_CONFIG']['BACKBONE']
+DEVICE = config['MODEL_CONFIG']['DEVICE']
 
 
 def _get_clones(module, N):
@@ -291,7 +297,9 @@ class MaPLeIQAPredictor(nn.Module):
 
             for name, param in disc.named_parameters():
                 if "prompt_learner" not in name:
-                    param.requires_grad = False
+                    if "image_encoder" in name and not config['MODEL_CONFIG'].getboolean('FREEZE_IMAGE_ENCODER'): continue
+                    elif "text_encoder" in name and not config['MODEL_CONFIG'].getboolean('FREEZE_TEXT_ENCODER'): continue
+                    else: param.requires_grad = False
 
             setattr(self, 'clipmodel_{}'.format(i), disc)
         if self.num_clip > 1:
@@ -415,7 +423,7 @@ class MaPLeIQAPredictor_V3(nn.Module):
     """
     def __init__(self, classnames, clip_model, input_size=MAPLE_INPUT_SIZE):
         super().__init__()
-        self.predictor = MaPLeIQAPredictor(classnames, load_clip_to_device().float())
+        self.predictor = MaPLeIQAPredictor(classnames, clip_model)
         self.reshaper = ImageBatchReshape(input_size)
 
     def forward(self, image):
@@ -475,62 +483,15 @@ class MaPLeIQAPredictor_V4(nn.Module):
         else:
             return logits_list, logits_list
 
-scenes = ['animal', 'cityscape', 'human', 'indoor', 'landscape', 'night', 'plant', 'still_life', 'others']
-qualitys = ['bad', 'poor', 'fair', 'good', 'perfect']
-dists_map = ['jpeg2000 compression', 'jpeg compression', 'noise', 'blur', 'color', 'contrast', 'overexposure',
-            'underexposure', 'spatial', 'quantization', 'other']
-
-class MaPLeIQAPredictor_V5(nn.Module):
-    """
-    MaPLe-IQA with architecture similar to LIQE(https://github.com/zwx8981/LIQE).
-
-    Parameters:
-    
-    """
-    def __init__(self, classnames, clip_model, input_size=MAPLE_INPUT_SIZE, step=32, num_patch=15):
-        super().__init__()
-
-        self.model = CustomCLIP(classnames, clip_model)
-        self.model.logit_scale.requires_grad = False
-        #for name, param in self.model.named_parameters():
-            #if "prompt_learner" not in name:
-                #param.requires_grad = False
-        
-        self.step = step
-        self.num_patch = num_patch
-        #self.regressor = NonLinearRegressor(n_input=int(num_patch*len(classnames)/batch_size), n_output=1)
-
-    def forward(self, x):
-        batch_size = x.size(0)
-        x = x.unfold(2, 224, self.step).unfold(3, 224, self.step).permute(2, 3, 0, 1, 4, 5).reshape(-1, 3, 224, 224)
-    
-        sel_step = x.size(0) // self.num_patch
-        sel = torch.zeros(self.num_patch)
-        for i in range(self.num_patch):
-            sel[i] = sel_step * i
-        sel = sel.long()
-        x = x[sel, ...]
-    
-        #x = x.view(-1, x.size(2), x.size(3), x.size(4))
-
-        logits_per_image = self.model(x)
-
-        logits_per_image = logits_per_image.view(batch_size, self.num_patch, -1)
-        logits_per_image = logits_per_image.mean(1)
-        logits_per_image = F.softmax(logits_per_image, dim=1)
-
-        logits_per_image = logits_per_image.view(-1, len(qualitys), len(scenes), len(dists_map))
-        logits_quality = logits_per_image.sum(3).sum(2)
-
-        quality_prediction = 1 * logits_quality[:, 0] + 2 * logits_quality[:, 1] + 3 * logits_quality[:, 2] + \
-                4 * logits_quality[:, 3] + 5 * logits_quality[:, 4]
-
-        return quality_prediction, None
+#Extend other models and add to dictionary
+model_dict = {'MaPLeIQAPredictor': MaPLeIQAPredictor,
+              'MaPLeIQAPredictor_V3': MaPLeIQAPredictor_V3,}
 
 #for some reason training fp16 on cuda create nan gradient but normal fp32
-def build_mapleiqa(classnames):
+def build_mapleiqa(classnames, model_name):
     print("Building custom CLIP")
-    model = MaPLeIQAPredictor(classnames, load_clip_to_device().float())
+    architecture = model_dict[model_name]
+    model = architecture(classnames, load_clip_to_device().float())
     print("Turning off gradients in both the image and the text encoder")
     name_to_update = "prompt_learner"
     for name, param in model.named_parameters():
@@ -604,24 +565,5 @@ def build_mapleiqa_v4(classnames):
         if param.requires_grad:
             enabled.add(name)
     print(f"Parameters to be updated: {enabled}")
-
-    return model.float().to(DEVICE)
-
-def build_mapleiqa_v5(classnames):
-    print("Building custom CLIP")
-    model = MaPLeIQAPredictor_V5(classnames, load_clip_to_device().float())
-    print("Turning off gradients in both the image and the text encoder")
-    name_to_update = "prompt_learner"
-    for name, param in model.named_parameters():
-        if name_to_update not in name:
-            #Make sure that VPT prompts are updated
-            if "VPT" in name:
-                param.requires_grad_(True)
-
-    enabled = set()
-    for name, param in model.named_parameters():
-        if param.requires_grad:
-            enabled.add(name)
-    #print(f"Parameters to be updated: {enabled}")
 
     return model.float().to(DEVICE)
