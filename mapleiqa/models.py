@@ -1,43 +1,72 @@
-import os.path as osp
-from collections import OrderedDict
 import copy
 import torch
 import torch.nn as nn
-from torch.nn import functional as F
-from torch.cuda.amp import GradScaler, autocast
 from torch import linalg as LA
 from torchvision.transforms import CenterCrop
+from typing import List, Type, Dict
 import configparser
 
-from models.clip import clip
-from models.clip.simple_tokenizer import SimpleTokenizer as _Tokenizer
+from clip import clip
 
-def parse_tuple(input):
+def build_mapleiqa(classnames:List[str], 
+                   model_name:str, 
+                   config_dir:str):
+    """
+    Build MaPLe-IQA models.
+
+    :param classnames: List of classes equivalent to number of CLIP models.
+    :param model_name: Name of the model to build, packages include MaPLeIQA,
+                    but if you want to modify source code, please add new models
+                    to model dictionary.
+    :param config_dir: Directory of the .ini config file.
+
+    :return: PyTorch MaPLe-IQA model.
+    """
+    #Extend other models and add to dictionary
+    print("Building custom CLIP")
+
+    config = configparser.ConfigParser()
+    config.read(config_dir)
+
+    #When add a new model to source, remember to include it in dict.
+    model_dict = {'MaPLeIQA': MaPLeIQA}
+    
+    architecture = model_dict[model_name]
+    model = architecture(classnames, load_clip_to_device(config).float(), config)
+    if(config['MODEL_CONFIG'].getboolean('FREEZE_IMAGE_ENCODER')):
+        print("Turning off gradients in image encoder")
+
+    if(config['MODEL_CONFIG'].getboolean('FREEZE_TEXT_ENCODER')):
+        print("Turning off gradients in text encoder")
+
+    if(not config['MODEL_CONFIG'].getboolean('FREEZE_IMAGE_ENCODER') and not config['MODEL_CONFIG'].getboolean('FREEZE_TEXT_ENCODER')):
+        print("Turning on gradients in image and text encoder")
+    name_to_update = "prompt_learner"
+    for name, param in model.named_parameters():
+        if name_to_update not in name:
+            # Make sure that VPT prompts are updated
+            if "VPT" in name:
+                param.requires_grad_(True)
+
+    enabled = set()
+    for name, param in model.named_parameters():
+        if param.requires_grad:
+            enabled.add(name)
+    #print(f"Parameters to be updated: {enabled}")
+
+    return model.float().to(config['MODEL_CONFIG']['DEVICE'])
+
+def parse_tuple(input:str):
     return tuple(int(k.strip()) for k in input[1:-1].split(','))
 
-_tokenizer = _Tokenizer()
-
-config = configparser.ConfigParser()
-config.read('/home/ccl/Code/MaPLe-IQA/CLIP/config_gen/mapleiqa_sample_2.ini')
-
-MAPLE_PROMPT_DEPTH = int(config['MODEL_CONFIG']['MAPLE_PROMPT_DEPTH'])
-MAPLE_INPUT_SIZE = parse_tuple(config['MODEL_CONFIG']['MAPLE_INPUT_SIZE'])
-MAPLE_N_CTX = int(config['MODEL_CONFIG']['MAPLE_N_CTX'])
-MAPLE_CTX_INIT = config['MODEL_CONFIG']['MAPLE_CTX_INIT']
-MAPLE_PRETRAIN_DIR = config['MODEL_CONFIG']['MAPLE_PRETRAIN_DIR']
-MAPLE_POS_EMBED = config['MODEL_CONFIG']['MAPLE_POS_EMBED']
-MAPLE_INNER_BATCH = int(config['MODEL_CONFIG']['MAPLE_INNER_BATCH'])
-
-BACKBONE = config['MODEL_CONFIG']['BACKBONE']
-DEVICE = config['MODEL_CONFIG']['DEVICE']
-
-
-def _get_clones(module, N):
+def _get_clones(module:Type[nn.Module], 
+                N:int):
     return nn.ModuleList([copy.deepcopy(module) for i in range(N)])
 
-def load_clip_to_device(device=DEVICE):
-    url = clip._MODELS[BACKBONE]
+def load_clip_to_device(config:Dict):
+    url = clip._MODELS[config['MODEL_CONFIG']['BACKBONE']]
     model_path = clip._download(url)
+    device = config['MODEL_CONFIG']['DEVICE']
 
     try:
         # loading JIT archive
@@ -51,13 +80,13 @@ def load_clip_to_device(device=DEVICE):
                       "vision_depth": 0,
                       "language_depth": 0, "vision_ctx": 0,
                       "language_ctx": 0,
-                      "maple_length": MAPLE_N_CTX,
-                      "pos_embed": MAPLE_POS_EMBED}
+                      "maple_length": int(config['MODEL_CONFIG']['MAPLE_N_CTX']),
+                      "pos_embed": config['MODEL_CONFIG']['MAPLE_POS_EMBED']}
     model = clip.build_model(state_dict or model.state_dict(), design_details)
 
     return model
 
-class TextEncoder(nn.Module):
+class MaPLeIQATextEncoder(nn.Module):
     def __init__(self, clip_model):
         super().__init__()
         self.transformer = clip_model.transformer
@@ -82,20 +111,19 @@ class TextEncoder(nn.Module):
 
         return x
 
-
 class MultiModalPromptLearner(nn.Module):
-    def __init__(self, classnames, clip_model):
+    def __init__(self, classnames, clip_model, config):
         super().__init__()
         n_cls = len(classnames)
-        n_ctx = MAPLE_N_CTX
-        ctx_init = MAPLE_CTX_INIT
+        n_ctx = config['MODEL_CONFIG'].getint('MAPLE_N_CTX')
+        ctx_init = config['MODEL_CONFIG']['MAPLE_CTX_INIT']
         dtype = clip_model.dtype
         ctx_dim = clip_model.ln_final.weight.shape[0]
         clip_imsize = clip_model.visual.input_resolution
-        cfg_imsize = MAPLE_INPUT_SIZE[0]
+        cfg_imsize = parse_tuple(config['MODEL_CONFIG']['MAPLE_INPUT_SIZE'])[0]
         # Default is 1, which is compound shallow prompting
-        assert MAPLE_PROMPT_DEPTH >= 1, "For MaPLe, PROMPT_DEPTH should be >= 1"
-        self.compound_prompts_depth = MAPLE_PROMPT_DEPTH  # max=12, but will create 11 such shared prompts
+        assert config['MODEL_CONFIG'].getint('MAPLE_PROMPT_DEPTH') >= 1, "For MaPLe, PROMPT_DEPTH should be >= 1"
+        self.compound_prompts_depth = config['MODEL_CONFIG'].getint('MAPLE_PROMPT_DEPTH')  # max=12, but will create 11 such shared prompts
         assert cfg_imsize == clip_imsize, f"cfg_imsize ({cfg_imsize}) must equal to clip_imsize ({clip_imsize})"
 
         if ctx_init and (n_ctx) <= 4:
@@ -134,7 +162,7 @@ class MultiModalPromptLearner(nn.Module):
         self.compound_prompt_projections = _get_clones(single_layer, self.compound_prompts_depth - 1)
 
         classnames = [name.replace("_", " ") for name in classnames]
-        name_lens = [len(_tokenizer.encode(name)) for name in classnames]
+        #name_lens = [len(_tokenizer.encode(name)) for name in classnames]
         prompts = [prompt_prefix + " " + name + "." for name in classnames]
 
         tokenized_prompts = torch.cat([clip.tokenize(p) for p in prompts])  # (n_cls, n_tkn)
@@ -150,7 +178,7 @@ class MultiModalPromptLearner(nn.Module):
         self.n_cls = n_cls
         self.n_ctx = n_ctx
         self.tokenized_prompts = tokenized_prompts  # torch.Tensor
-        self.name_lens = name_lens
+        #self.name_lens = name_lens
 
     def construct_prompts(self, ctx, prefix, suffix, label=None):
         # dim0 is either batch_size (during training) or n_cls (during testing)
@@ -191,19 +219,18 @@ class MultiModalPromptLearner(nn.Module):
         # Now the other way around
         # We will project the textual prompts from 512 to 768
         return prompts, self.proj(self.ctx), self.compound_prompts_text, visual_deep_prompts   # pass here original, as for visual 768 is required
-
-
+    
 class CustomCLIP(nn.Module):
-    def __init__(self, classnames, clip_model):
+    def __init__(self, classnames, clip_model, config):
         super().__init__()
-        self.prompt_learner = MultiModalPromptLearner(classnames, clip_model)
+        self.prompt_learner = MultiModalPromptLearner(classnames, clip_model, config)
         self.tokenized_prompts = self.prompt_learner.tokenized_prompts
         self.image_encoder = clip_model.visual
-        self.text_encoder = TextEncoder(clip_model)
+        self.text_encoder = MaPLeIQATextEncoder(clip_model)
         self.logit_scale = clip_model.logit_scale
         self.dtype = clip_model.dtype
 
-    def forward(self, image, label=None):
+    def forward(self, image):
         tokenized_prompts = self.tokenized_prompts
         logit_scale = self.logit_scale.exp()
 
@@ -216,60 +243,6 @@ class CustomCLIP(nn.Module):
         logits = logit_scale * torch.matmul(image_features ,text_features.t())
 
         return logits
-
-class CustomCLIP_V2(nn.Module):
-    def __init__(self, classnames, clip_model):
-        super().__init__()
-        self.prompt_learner = MultiModalPromptLearner(classnames, clip_model)
-        self.tokenized_prompts = self.prompt_learner.tokenized_prompts
-        self.image_encoder = clip_model.visual
-        self.text_encoder = TextEncoder(clip_model)
-        self.logit_scale = clip_model.logit_scale
-        self.dtype = clip_model.dtype
-
-    def forward(self, image, label=None):
-        tokenized_prompts = self.tokenized_prompts
-        logit_scale = self.logit_scale.exp()
-
-        prompts, shared_ctx, deep_compound_prompts_text, deep_compound_prompts_vision = self.prompt_learner()
-        text_features = self.text_encoder(prompts, tokenized_prompts, deep_compound_prompts_text)
-        image_features = self.image_encoder(image.type(self.dtype), shared_ctx, deep_compound_prompts_vision)
-
-        image_features = torch.div(image_features, LA.norm(image_features, dim=-1, keepdim=True))
-        text_features = torch.div(text_features , LA.norm(text_features, dim=-1, keepdim=True))
-
-        return image_features, text_features
-
-class MaPLeEncoder(nn.Module):
-    """
-    Return inference result of CLIP's image and text encoder with prompt learner. 
-    """
-    def __init__(self, classnames, clip_model, freeze_txt_encoder=False):
-        super().__init__()
-        self.prompt_learner = MultiModalPromptLearner(classnames, clip_model)
-        self.tokenized_prompts = self.prompt_learner.tokenized_prompts
-        self.image_encoder = clip_model.visual
-        self.text_encoder = TextEncoder(clip_model)
-        if freeze_txt_encoder:
-            for name, param in self.text_encoder.named_parameters():
-                param.requires_grad = False
-        self.logit_scale = clip_model.logit_scale
-        self.dtype = clip_model.dtype
-
-    def forward(self, image, label=None):
-        tokenized_prompts = self.tokenized_prompts
-        logit_scale = self.logit_scale.exp()
-
-        prompts, shared_ctx, deep_compound_prompts_text, deep_compound_prompts_vision = self.prompt_learner()
-        text_features = self.text_encoder(prompts, tokenized_prompts, deep_compound_prompts_text)
-        image_features = self.image_encoder(image.type(self.dtype), shared_ctx, deep_compound_prompts_vision)
-
-        image_features = torch.div(image_features, LA.norm(image_features, dim=-1, keepdim=True))
-        text_features = torch.div(text_features , LA.norm(text_features, dim=-1, keepdim=True))
-        logits_per_image = logit_scale * torch.matmul(image_features ,text_features.t())
-        logits_per_text = logit_scale * torch.matmul(text_features ,image_features.t())
-
-        return logits_per_image, logits_per_text
 
 class NonLinearRegressor(nn.Module):
     def __init__(self, n_input, n_output, n_hidden=128):
@@ -287,13 +260,13 @@ class NonLinearRegressor(nn.Module):
         return self.linear_3(x)
 
 class MaPLeIQAPredictor(nn.Module):
-    def __init__(self, classnames, clip_model):
+    def __init__(self, classnames, clip_model, config):
         super().__init__()
 
         self.num_clip = len(classnames)
 
         for i in range(self.num_clip):
-            disc = CustomCLIP(classnames[i], clip_model)
+            disc = CustomCLIP(classnames[i], clip_model, config)
 
             for name, param in disc.named_parameters():
                 if "prompt_learner" not in name:
@@ -314,43 +287,9 @@ class MaPLeIQAPredictor(nn.Module):
         logits_list = torch.cat(logits_list, dim=1).float()
         if self.num_clip > 1:
             pred_score = self.regressor(logits_list)
-            return pred_score, logits_list
+            return pred_score
         else:
-            return logits_list, logits_list
-
-class MaPLeIQAPredictor_V2(nn.Module):
-    """
-    Added pos embedding removal.
-    """
-    def __init__(self, classnames, clip_model, maple_state_dict):
-        super().__init__()
-
-        self.num_clip = len(classnames)
-
-        for i in range(self.num_clip):
-            disc = CustomCLIP(classnames[i], clip_model)
-            disc.load_state_dict(maple_state_dict, strict=False)
-            for name, param in disc.named_parameters():
-                if name in maple_state_dict:
-                    param.requires_grad = False
-            
-
-            setattr(self, 'clipmodel_{}'.format(i), disc)
-        if self.num_clip > 1:
-            self.regressor = NonLinearRegressor(n_input=self.num_clip, n_output=1)
-
-    def forward(self, image):
-        logits_list = []
-        for i in range(self.num_clip):
-            disc = getattr(self, 'clipmodel_{}'.format(i))
-            logits = disc(image)
-            logits_list.append(logits[:, 0].unsqueeze(1))
-        logits_list = torch.cat(logits_list, dim=1).float()
-        if self.num_clip > 1:
-            pred_score = self.regressor(logits_list)
-            return pred_score, logits_list
-        else:
-            return logits_list, logits_list
+            return logits_list
 
 class ImageBatchReshape(nn.Module):
     """
@@ -371,11 +310,10 @@ class ImageBatchReshape(nn.Module):
         Using pytorch CenterCrop to remove excess around image for easier reshape
 
         Args:
-        image (torch.Tensor): image input as torch.Tensor
+            image (torch.Tensor): image input as torch.Tensor
 
         Returns:
-        image (torch.Tensor): trimmed image as torch.Tensor
-        batch_num (int): number of resulted images
+            image (torch.Tensor): trimmed image as torch.Tensor
         """
         if isinstance(self.output_size, tuple):
             width_num = int(image.shape[-1]/self.output_size[1])
@@ -391,10 +329,10 @@ class ImageBatchReshape(nn.Module):
         Reshape image to smaller frames
 
         Args:
-        image (torch.Tensor): image input as torch.Tensor
+            image (torch.Tensor): image input as torch.Tensor
 
         Returns:
-        image (torch.Tensor): reshaped image as torch.Tensor
+            image (torch.Tensor): reshaped image as torch.Tensor
         """
         assert len(image.shape) <= 4 and len(image.shape) >= 3, "Reshape operation only accept 3 or 4 dimension images" 
         if len(image.shape) == 3:
@@ -409,21 +347,19 @@ class ImageBatchReshape(nn.Module):
         return image
 
     def forward(self, image):
-        image, batch_num = self.remove_excess(image)
+        image = self.remove_excess(image)
         image = self.reshape(image)
         return image
 
 
-class MaPLeIQAPredictor_V3(nn.Module):
+class MaPLeIQA(nn.Module):
     """
-    MaPLe-IQA with image batches splitting
-
-    Parameters:
-    
+    MaPLe-IQA model. 
     """
-    def __init__(self, classnames, clip_model, input_size=MAPLE_INPUT_SIZE):
+    def __init__(self, classnames, clip_model, config):
         super().__init__()
-        self.predictor = MaPLeIQAPredictor(classnames, clip_model)
+        input_size= parse_tuple(config['MODEL_CONFIG']['MAPLE_INPUT_SIZE'])
+        self.predictor = MaPLeIQAPredictor(classnames, clip_model, config)
         self.reshaper = ImageBatchReshape(input_size)
 
     def forward(self, image):
@@ -431,139 +367,11 @@ class MaPLeIQAPredictor_V3(nn.Module):
         image = self.reshaper(image)
         if len(image.shape) ==  5:
             for batch in image:
-                score = torch.mean(self.predictor(batch)[0]).reshape(1)
+                score = torch.mean(self.predictor(batch)).reshape(1)
                 result.append(score)
             result = torch.cat(result, dim=0)
-            return result, None
+            return result
         
         else:
-            result = torch.mean(self.predictor(batch)[0]).reshape(1)
-            return result, None
-
-class MaPLeIQAPredictor_V4(nn.Module):
-    """
-    MaPLe-IQA with image batches splitting to multiple features and to regressor.
-
-    Parameters:
-    
-    """
-    def __init__(self, classnames, clip_model, input_size=MAPLE_INPUT_SIZE, num_batch=MAPLE_INNER_BATCH):
-        super().__init__()
-
-        self.num_clip = len(classnames)
-        self.num_batch = num_batch
-
-        for i in range(self.num_clip):
-            disc = CustomCLIP(classnames[i], clip_model)
-
-            for name, param in disc.named_parameters():
-                if "prompt_learner" not in name:
-                    param.requires_grad = False
-
-            setattr(self, 'clipmodel_{}'.format(i), disc)
-        if self.num_clip > 1:
-            self.regressor = NonLinearRegressor(n_input=self.num_clip*self.num_batch, n_output=1)
-
-        self.reshaper = ImageBatchReshape(input_size)
-
-    def forward(self, image):
-        image = self.reshaper(image)
-        batch_size = image.shape[0]
-        logits_list = []
-        for i in range(self.num_clip):
-            disc = getattr(self, 'clipmodel_{}'.format(i))
-            for batch in image:
-                logits = disc(batch)
-                logits_list.append(logits[:, 0].unsqueeze(1))
-        logits_list = torch.cat(logits_list, dim=0)
-        logits_list = torch.reshape(logits_list, (batch_size, -1))
-        if self.num_clip*self.num_batch > 1:
-            pred_score = self.regressor(logits_list)
-            return pred_score, logits_list
-        else:
-            return logits_list, logits_list
-
-#Extend other models and add to dictionary
-model_dict = {'MaPLeIQAPredictor': MaPLeIQAPredictor,
-              'MaPLeIQAPredictor_V3': MaPLeIQAPredictor_V3,}
-
-#for some reason training fp16 on cuda create nan gradient but normal fp32
-def build_mapleiqa(classnames, model_name):
-    print("Building custom CLIP")
-    architecture = model_dict[model_name]
-    model = architecture(classnames, load_clip_to_device().float())
-    print("Turning off gradients in both the image and the text encoder")
-    name_to_update = "prompt_learner"
-    for name, param in model.named_parameters():
-        if name_to_update not in name:
-            # Make sure that VPT prompts are updated
-            if "VPT" in name:
-                param.requires_grad_(True)
-
-    enabled = set()
-    for name, param in model.named_parameters():
-        if param.requires_grad:
-            enabled.add(name)
-    print(f"Parameters to be updated: {enabled}")
-
-    return model.float().to(DEVICE)
-
-def build_mapleiqa_v2(classnames):
-    print("Building custom CLIP")
-    model_state_dict = torch.load(MAPLE_PRETRAIN_DIR, map_location=DEVICE)['state_dict']
-    new_state_dict = model_state_dict.copy()
-    to_delete = ['prompt_learner.token_prefix', 'prompt_learner.token_suffix', 'prompt_learner.ctx', 'prompt_learner.compound_prompts_text']
-
-    for param_tensor in model_state_dict:
-        for name in to_delete:
-            if name in param_tensor:
-                del new_state_dict[param_tensor]
-    
-    model = MaPLeIQAPredictor_V2(classnames, load_clip_to_device().float(), new_state_dict)
-    print("Turning off gradients for pretrained MaPLe")
-  
-    enabled = set()
-    for name, param in model.named_parameters():
-        if param.requires_grad:
-            enabled.add(name)
-    print(f"Parameters to be updated: {enabled}")
-
-    return model.float().to(DEVICE)
-
-def build_mapleiqa_v3(classnames):
-    print("Building custom CLIP")
-    model = MaPLeIQAPredictor_V3(classnames, load_clip_to_device().float())
-    print("Turning off gradients in both the image and the text encoder")
-    name_to_update = "prompt_learner"
-    for name, param in model.named_parameters():
-        if name_to_update not in name:
-            # Make sure that VPT prompts are updated
-            if "VPT" in name:
-                param.requires_grad_(True)
-
-    enabled = set()
-    for name, param in model.named_parameters():
-        if param.requires_grad:
-            enabled.add(name)
-    print(f"Parameters to be updated: {enabled}")
-
-    return model.float().to(DEVICE)
-
-def build_mapleiqa_v4(classnames):
-    print("Building custom CLIP")
-    model = MaPLeIQAPredictor_V4(classnames, load_clip_to_device().float())
-    print("Turning off gradients in both the image and the text encoder")
-    name_to_update = "prompt_learner"
-    for name, param in model.named_parameters():
-        if name_to_update not in name:
-            # Make sure that VPT prompts are updated
-            if "VPT" in name:
-                param.requires_grad_(True)
-
-    enabled = set()
-    for name, param in model.named_parameters():
-        if param.requires_grad:
-            enabled.add(name)
-    print(f"Parameters to be updated: {enabled}")
-
-    return model.float().to(DEVICE)
+            result = torch.mean(self.predictor(batch)).reshape(1)
+            return result

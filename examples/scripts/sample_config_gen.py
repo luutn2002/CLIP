@@ -2,22 +2,23 @@ import configparser
 import os
 from torch.cuda import is_available
 
+#Script used to create configuration for models.
+
 config = configparser.ConfigParser()
-TEST_MODEL_NAME = 'mapleiqa_sample_2'
+TEST_MODEL_NAME = 'mapleiqa'
 DEVICE = "cuda:0" if is_available() else "cpu"
-#DEVICE = "cpu"
 
 config['DEFAULT']= {
   'TEST_MODEL_NAME' : TEST_MODEL_NAME,
-  'KONIQ10K_DIR' : '/home/ccl/Datasets/koniq10k', #directory of dataset
+  'KONIQ10K_DIR' : '/home/ccl/Datasets/koniq10k',
   'TID2008_DIR' : '/home/ccl/Datasets/tid2008',
-  'CSIQ_DIR' : '/home/ccl/Datasets/csiq',
   'TID2013_DIR' : '/home/ccl/Datasets/tid2013',
   'SPAQ_DIR' : '/home/ccl/Datasets/spaq',
-  'LIVE_DIR': '/home/ccl/Datasets/live1/ChallengeDB_release',
+  'LIVE_DIR': '/home/ccl/Datasets/live/ChallengeDB_release',
   'KADID10K_DIR' : '/home/ccl/Datasets/kadid10k',
   'CHECKPOINT_DIR' : f'ckpt/{TEST_MODEL_NAME}',
 }
+
 config['TRAINING_CONFIG']= {
   'LABEL_SET' : ["bad photo", "good photo"],
 
@@ -26,9 +27,6 @@ config['TRAINING_CONFIG']= {
 
   'TID2008_IMG_DIR' : os.path.join(config['DEFAULT']['TID2008_DIR'], 'distorted_images'),
   'TID2008_SCORE_DIR' : os.path.join(config['DEFAULT']['TID2008_DIR'], 'mos_with_names.txt'),
-
-  'CSIQ_IMG_DIR' : os.path.join(config['DEFAULT']['CSIQ_DIR'], 'img'),
-  'CSIQ_SCORE_DIR' : os.path.join(config['DEFAULT']['CSIQ_DIR'], 'mos.csv'),
 
   'TID2013_IMG_DIR' : os.path.join(config['DEFAULT']['TID2013_DIR'], 'distorted_images'),
   'TID2013_SCORE_DIR' : os.path.join(config['DEFAULT']['TID2013_DIR'], 'mos_with_names.txt'),
@@ -44,8 +42,7 @@ config['TRAINING_CONFIG']= {
   'KADID10K_SCORE_DIR' : os.path.join(config['DEFAULT']['KADID10K_DIR'], 'dmos.csv'),
 
   'BATCH_SIZE' : 32,
-  'GRADIENT_CLIP' : 10,
-  'EPOCHS' : 10,
+  'EPOCHS' : 100,
   'BEST_CHECKPOINT_PATH' : os.path.join(config['DEFAULT']['CHECKPOINT_DIR'], 'best.pth'),
   'LATEST_CHECKPOINT_PATH' : os.path.join(config['DEFAULT']['CHECKPOINT_DIR'], 'latest.pth'),
   'DEVICE' : DEVICE
@@ -61,10 +58,10 @@ config['MODEL_CONFIG'] = {
   'MAPLE_INNER_BATCH' : 12,
   'BACKBONE' : 'ViT-B/32',
   'DEVICE' : DEVICE,
-  'MODEL': 'MaPLeIQAPredictor_V3',
-  'FREEZE_IMAGE_ENCODER': True,
-  'FREEZE_TEXT_ENCODER': True
+  'MODEL': 'MaPLeIQA',
+  'FREEZE_IMAGE_ENCODER': False,
+  'FREEZE_TEXT_ENCODER': False
 }
 
-with open(f"{config['DEFAULT']['TEST_MODEL_NAME']}.ini", 'w') as configfile:
+with open(f"./configs/{config['DEFAULT']['TEST_MODEL_NAME']}.ini", 'w') as configfile:
   config.write(configfile)
