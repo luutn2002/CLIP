@@ -6,7 +6,7 @@ from torchvision.transforms import CenterCrop
 from typing import List, Type, Dict
 import configparser
 
-from clip import clip
+from .clip import clip
 
 def build_mapleiqa(classnames:List[str], 
                    model_name:str, 
