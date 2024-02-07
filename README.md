@@ -78,7 +78,7 @@ model = build_mapleiqa(["good photo", "bad photo"], #List of prompts equivalent 
 ckpt = torch.load("./checkpoint_sample_2.pt") #Pretrained checkpoint
 model.load_state_dict(ckpt['model_state_dict']) #Load our pretrained models if you prefer
 ```
-Check our [example scripts](https://arxiv.org/pdf/2210.03117.pdf) for more detailson how we train the model.
+Check our [example scripts](https://github.com/luutn2002/mapleiqa/blob/master/examples/scripts/train_example.py) for more detailson how we train the model.
 
 ## Result with datasets
 
@@ -92,3 +92,15 @@ Check our [example scripts](https://arxiv.org/pdf/2210.03117.pdf) for more detai
 | KADID-10K | 0.930 | 0.926 |
 
 > Notes: Datasets are train all at once in sequentials.
+
+## Citation
+
+```bibtex
+@INPROCEEDINGS{10402183,
+  author={Luu, Nhan T. and Onuoha, Chibuike and Thang, Truong Cong},
+  booktitle={2023 IEEE 15th International Conference on Computational Intelligence and Communication Networks (CICN)}, 
+  title={Blind Image Quality Assessment With Multimodal Prompt Learning}, 
+  year={2023},
+  pages={614-618},
+  doi={10.1109/CICN59264.2023.10402183}}
+```
