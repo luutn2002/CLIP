@@ -16,9 +16,5 @@ setup(
         for r in pkg_resources.parse_requirements(
             open(os.path.join(os.path.dirname(__file__), "requirements.txt"))
         )
-    ],
-    package_data={
-      'data': ['clip/*.txt.gz'],
-    },
-    include_package_data=True
+    ]
 )
