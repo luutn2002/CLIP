@@ -10,7 +10,7 @@ setup(
     description="MaPLe models for blindd image quality assessment (BIQA).",
     author="LUU Trong Nhan",
     author_email = "ltnhan0902@gmail.com",
-    packages=find_packages(exclude=["examples*"]),
+    packages=find_packages(exclude=["examples*"], include=["*.txt.gz"]),
     install_requires=[
         str(r)
         for r in pkg_resources.parse_requirements(
