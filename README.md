@@ -78,7 +78,7 @@ model = build_mapleiqa(["good photo", "bad photo"], #List of prompts equivalent 
 ckpt = torch.load("./checkpoint_sample_2.pt") #Pretrained checkpoint
 model.load_state_dict(ckpt['model_state_dict']) #Load our pretrained models if you prefer
 ```
-Check our [example scripts](https://github.com/luutn2002/mapleiqa/blob/master/examples/scripts/train_example.py) for more detailson how we train the model.
+Download our pretrained model [here](https://drive.google.com/file/d/1fLWCtG6EHDkJVnsafc_0TUFX5ynC9vwd/view?usp=sharing). Check our [example scripts](https://github.com/luutn2002/mapleiqa/blob/master/examples/scripts/train_example.py) for more details on how we train the model.
 
 ## Result with datasets
 
